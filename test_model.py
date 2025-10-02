@@ -1,91 +1,112 @@
 #!/usr/bin/env python3
+"""
+Quick sanity check for the 3D ViT model in this repo.
+
+Loads `model_config.json`, instantiates `VitDet3D`, optionally loads
+`pretrained_model/pytorch_model.bin`, and runs a dummy forward pass.
+All output messages are in English.
+"""
+
+import os
 import torch
 import numpy as np
-from transformers import ViTConfig
+from typing import Tuple
+
+try:
+    from transformers import ViTConfig
+except Exception:
+    ViTConfig = None
+
 from model import VitDet3D
 
-def test_model_loading():
-    """测试模型加载和基本功能"""
-    print("=== 肺结节检测模型测试 ===")
-    
-    # 加载配置
+
+def _tuplize_image_size(v) -> Tuple[int, int, int]:
+    """Return image size as (D, H, W) from config value.
+    Accepts single int or sequence of length 3.
+    Defaults to (40, 128, 128) if not available.
+    """
+    try:
+        if isinstance(v, int):
+            return (40, v, v)  # assume square slices if single int
+        if isinstance(v, (list, tuple)) and len(v) == 3:
+            return tuple(int(x) for x in v)
+    except Exception:
+        pass
+    return (40, 128, 128)
+
+
+def test_model_loading() -> bool:
+    print("=== Sanity: load config ===")
+    if ViTConfig is None:
+        print("transformers is not installed. Run: pip install transformers")
+        return False
+
     try:
         config = ViTConfig.from_pretrained("model_config.json")
-        print(f"✓ 配置加载成功")
-        print(f"  - 图像尺寸: {config.image_size}")
-        print(f"  - 补丁尺寸: {config.patch_size}")
-        print(f"  - 隐藏层大小: {config.hidden_size}")
-        print(f"  - 注意力头数: {config.num_attention_heads}")
+        print("Loaded model_config.json")
+        print(f"  - image_size: {getattr(config, 'image_size', 'n/a')}")
+        print(f"  - patch_size: {getattr(config, 'patch_size', 'n/a')}")
+        print(f"  - hidden_size: {getattr(config, 'hidden_size', 'n/a')}")
+        print(f"  - num_attention_heads: {getattr(config, 'num_attention_heads', 'n/a')}")
     except Exception as e:
-        print(f"✗ 配置加载失败: {e}")
+        print(f"Failed to load ViTConfig: {e}")
         return False
-    
-    # 创建模型
+
+    print("\n=== Instantiate model ===")
     try:
         model = VitDet3D(config)
-        print(f"✓ 模型创建成功")
-        
-        # 统计参数数量
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"  - 总参数数: {total_params:,}")
-        print(f"  - 可训练参数: {trainable_params:,}")
+        print(f"  - parameters: {total_params:,}")
+        print(f"  - trainable:  {trainable_params:,}")
     except Exception as e:
-        print(f"✗ 模型创建失败: {e}")
+        print(f"Failed to build model: {e}")
         return False
-    
-    # 尝试加载预训练权重
+
+    print("\n=== Load checkpoint (optional) ===")
+    ckpt = os.path.join("pretrained_model", "pytorch_model.bin")
+    if os.path.exists(ckpt):
+        try:
+            state = torch.load(ckpt, map_location="cpu")
+            model.load_state_dict(state, strict=False)
+            print("Loaded pretrained weights (strict=False)")
+        except Exception as e:
+            print(f"Warning: could not load weights: {e}")
+    else:
+        print("Checkpoint not found - skipping weight load.")
+
+    print("\n=== Dummy forward ===")
     try:
-        checkpoint_path = "./pretrained_model/pytorch_model.bin"
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        model.load_state_dict(checkpoint, strict=False)
-        print(f"✓ 预训练权重加载成功")
-    except Exception as e:
-        print(f"⚠ 预训练权重加载失败: {e}")
-        print("  继续使用随机初始化权重...")
-    
-    # 测试前向传播
-    try:
+        size = _tuplize_image_size(getattr(config, "image_size", None))
+        channels = int(getattr(config, "num_channels", 1))
+        batch = 2
+        dummy_input = torch.randn(batch, channels, *size)
+        dummy_labels = torch.zeros(batch)
+        dummy_bbox = torch.randn(batch, 6)
+
         model.eval()
-        batch_size = 2
-        # 创建虚拟输入数据 [batch, channels, depth, height, width]
-        dummy_input = torch.randn(batch_size, config.num_channels, *config.image_size)
-        dummy_labels = torch.zeros(batch_size)
-        dummy_bbox = torch.randn(batch_size, 6)  # [x1, y1, z1, x2, y2, z2]
-        
-        print(f"  - 输入形状: {dummy_input.shape}")
-        
         with torch.no_grad():
-            outputs = model(
-                pixel_values=dummy_input,
-                labels=dummy_labels,
-                bbox=dummy_bbox
-            )
-        
-        print(f"✓ 前向传播成功")
-        print(f"  - 分类输出形状: {outputs['logits'].shape}")
-        print(f"  - 边界框输出形状: {outputs['bbox'].shape}")
-        print(f"  - 损失值: {outputs['loss'].item():.4f}")
-        
+            out = model(pixel_values=dummy_input, labels=dummy_labels, bbox=dummy_bbox)
+
+        # Be flexible about output structure
+        logits = out.get("logits") if isinstance(out, dict) else None
+        bbox = out.get("bbox") if isinstance(out, dict) else None
+        loss = out.get("loss") if isinstance(out, dict) else None
+        if logits is not None:
+            print(f"  - logits: {tuple(logits.shape)}")
+        if bbox is not None:
+            print(f"  - bbox:   {tuple(bbox.shape)}")
+        if loss is not None:
+            print(f"  - loss:   {float(loss):.4f}")
+        print("Dummy forward OK.")
     except Exception as e:
-        print(f"✗ 前向传播失败: {e}")
+        print(f"Failed dummy forward: {e}")
         return False
-    
-    print("\n=== 测试完成 ===")
+
+    print("\n=== Done ===")
     return True
 
-def main():
-    success = test_model_loading()
-    if success:
-        print("✓ 模型部署验证成功！")
-        print("\n使用说明:")
-        print("1. 训练模型: python train.py")
-        print("2. 评估模型: python eval.py") 
-        print("3. 查看详细评估: jupyter notebook eval.ipynb")
-    else:
-        print("✗ 模型部署验证失败")
-    
-    return success
 
 if __name__ == "__main__":
-    main()
+    ok = test_model_loading()
+    raise SystemExit(0 if ok else 1)
