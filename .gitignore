@@ -6,3 +6,4 @@ __pycache__/dataset.cpython-311.pyc
 /__pycache__
 /.ipynb_checkpoints
 /eval_imgs
+pretrained_model/
